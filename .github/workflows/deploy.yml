@@ -1,0 +1,120 @@
+name: Deploy to gh-pages
+
+on:
+  workflow_dispatch:
+    inputs:
+      workflowRunId:
+        description: 'The ID of the workflow run'
+        required: true
+        type: number
+
+permissions:
+  actions: read
+  contents: read
+  pages: write
+  id-token: write
+  pull-requests: write
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: nuxt-build
+          github-token: ${{ secrets.TOKEN }}
+          repository: besfir/project-a
+          run-id: ${{ inputs.workflowRunId }}
+
+      - name: Upload generated site as artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./
+          name: nuxt-build
+          retention-days: 1
+
+      - name: Deploy to GitHub Pages
+        id: deployment  # id 추가
+        uses: actions/deploy-pages@v4
+        with:
+          token: ${{ secrets.TOKEN }}
+          artifact_name: nuxt-build
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: nuxt-build
+
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Install Unlighthouse Dependencies
+        run: bun i -g @unlighthouse/cli puppeteer netlify-cli
+
+      - name: Unlighthouse assertions and client
+        run: unlighthouse-ci --site ${{ steps.deployment.outputs.page_url }} --budget 75 --build-static --output-path ./__unlighthouse/ --router-prefix /gh-action-page/__unlighthouse
+
+      - name: Upload generated site as artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./
+          name: nuxt-lighthouse
+
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
+        with:
+          token: ${{ secrets.TOKEN }}
+          artifact_name: nuxt-lighthouse
+
+      - name: Delete artifacts from Current Repo
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.TOKEN }}
+          script: |
+            const runId = ${{ inputs.workflowRunId }};
+            const remoteArtifacts = await github.rest.actions.listWorkflowRunArtifacts({
+              owner: 'besfir',
+              repo: 'project-a',
+              run_id: runId
+            });
+            const remoteArtifactId = remoteArtifacts.data.artifacts[0].id;
+            await github.rest.actions.deleteArtifact({
+              owner: 'besfir',
+              repo: 'project-a',
+              artifact_id: remoteArtifactId
+            });
+            console.log(`Artifact with ID ${remoteArtifactId} deleted successfully.`);
+            
+            const artifactNames = ['nuxt-lighthouse', 'nuxt-build'];
+            
+            const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId
+            });
+            
+            for (const name of artifactNames) {
+              const artifact = artifacts.data.artifacts.find(artifact => artifact.name === name);
+            
+              if (artifact) {
+                await github.rest.actions.deleteArtifact({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  artifact_id: artifact.id
+              });
+              console.log(`${name} artifact with ID ${artifact.id} deleted successfully.`);
+              } else {
+                console.log(`Artifact with name ${name} not found.`);
+              }
+            }
